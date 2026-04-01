@@ -699,23 +699,41 @@ MenuRegistry.appendMenuItem(MenuId.SCMTitle, {
 	order: 2,
 });
 
-// Register buttons on the "Changes" group header (stage all, discard all, open)
+// Buttons on the "Changes" group header
 MenuRegistry.appendMenuItem(MenuId.SCMResourceGroupContext, {
 	command: { id: 'tauri-git.stageAll', title: 'Stage All Changes', icon: ThemeIcon.fromId('add') },
 	group: 'inline',
 	order: 3,
+	when: ContextKeyExpr.equals('scmResourceGroup', 'changes'),
 });
 
 MenuRegistry.appendMenuItem(MenuId.SCMResourceGroupContext, {
 	command: { id: 'tauri-git.discardAll', title: 'Discard All Changes', icon: ThemeIcon.fromId('discard') },
 	group: 'inline',
 	order: 2,
+	when: ContextKeyExpr.equals('scmResourceGroup', 'changes'),
 });
 
 MenuRegistry.appendMenuItem(MenuId.SCMResourceGroupContext, {
 	command: { id: 'tauri-git.openAllChanges', title: 'Open All Changes', icon: ThemeIcon.fromId('go-to-file') },
 	group: 'inline',
 	order: 1,
+	when: ContextKeyExpr.equals('scmResourceGroup', 'changes'),
+});
+
+// Buttons on the "Staged Changes" group header
+MenuRegistry.appendMenuItem(MenuId.SCMResourceGroupContext, {
+	command: { id: 'tauri-git.unstageAll', title: 'Unstage All Changes', icon: ThemeIcon.fromId('remove') },
+	group: 'inline',
+	order: 2,
+	when: ContextKeyExpr.equals('scmResourceGroup', 'staged'),
+});
+
+MenuRegistry.appendMenuItem(MenuId.SCMResourceGroupContext, {
+	command: { id: 'tauri-git.openAllChanges', title: 'Open All Staged Changes', icon: ThemeIcon.fromId('go-to-file') },
+	group: 'inline',
+	order: 1,
+	when: ContextKeyExpr.equals('scmResourceGroup', 'staged'),
 });
 
 // Register buttons on individual changed files (stage, discard, open)
