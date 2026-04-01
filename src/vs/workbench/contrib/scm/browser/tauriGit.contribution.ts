@@ -24,6 +24,7 @@ import { ILanguageService } from '../../../../editor/common/languages/language.j
 import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
+import { MenuId, MenuRegistry } from '../../../../platform/actions/common/actions.js';
 import type { ITextModel } from '../../../../editor/common/model.js';
 import type { Command } from '../../../../editor/common/languages.js';
 import type { Event } from '../../../../base/common/event.js';
@@ -398,6 +399,31 @@ class TauriGitContribution extends Disposable implements IWorkbenchContribution 
 				this.logService.error('[TauriGit] commit failed', err);
 			}
 		}));
+
+		this._register(CommandsRegistry.registerCommand('tauri-git.stageAll', async () => {
+			try {
+				await invokeGit('git_add', { path: rootPath, files: ['.'] });
+				await provider.refresh();
+			} catch (err) {
+				this.logService.error('[TauriGit] stage all failed', err);
+			}
+		}));
+
+		this._register(CommandsRegistry.registerCommand('tauri-git.unstageAll', async () => {
+			try {
+				const invoke = await getTauriInvoke();
+				if (invoke) {
+					await invoke('git_checkout', { path: rootPath, branch: 'HEAD' });
+				}
+				await provider.refresh();
+			} catch (err) {
+				this.logService.error('[TauriGit] unstage all failed', err);
+			}
+		}));
+
+		this._register(CommandsRegistry.registerCommand('tauri-git.refresh', async () => {
+			await provider.refresh();
+		}));
 	}
 }
 
@@ -438,3 +464,22 @@ registerWorkbenchContribution2(
 	TauriGitContribution,
 	WorkbenchPhase.AfterRestored,
 );
+
+// Register SCM title toolbar actions (the 4 buttons next to "CHANGES")
+MenuRegistry.appendMenuItem(MenuId.SCMTitle, {
+	command: { id: 'tauri-git.commit', title: 'Commit', icon: ThemeIcon.fromId('check') },
+	group: 'navigation',
+	order: 1,
+});
+
+MenuRegistry.appendMenuItem(MenuId.SCMTitle, {
+	command: { id: 'tauri-git.stageAll', title: 'Stage All Changes', icon: ThemeIcon.fromId('add') },
+	group: 'navigation',
+	order: 2,
+});
+
+MenuRegistry.appendMenuItem(MenuId.SCMTitle, {
+	command: { id: 'tauri-git.refresh', title: 'Refresh', icon: ThemeIcon.fromId('refresh') },
+	group: 'navigation',
+	order: 3,
+});
