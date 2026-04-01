@@ -25,6 +25,7 @@ import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uri
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
 import { MenuId, MenuRegistry } from '../../../../platform/actions/common/actions.js';
+import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
 import type { ITextModel } from '../../../../editor/common/model.js';
 import type { Command } from '../../../../editor/common/languages.js';
 import type { Event } from '../../../../base/common/event.js';
@@ -135,7 +136,7 @@ class TauriGitResourceGroup implements ISCMResourceGroup {
 	readonly _onDidChangeResources = new Emitter<void>();
 	readonly onDidChangeResources: Event<void> = this._onDidChangeResources.event;
 
-	readonly hideWhenEmpty = false;
+	readonly hideWhenEmpty: boolean;
 	contextValue: string | undefined;
 	readonly multiDiffEditorEnableViewChanges = false;
 
@@ -144,8 +145,10 @@ class TauriGitResourceGroup implements ISCMResourceGroup {
 		readonly label: string,
 		readonly provider: ISCMProvider,
 		private readonly _uriIdentService: IUriIdentityService,
+		hideWhenEmpty: boolean = false,
 	) {
 		this.contextValue = id;
+		this.hideWhenEmpty = hideWhenEmpty;
 	}
 
 	setResources(resources: ISCMResource[]): void {
@@ -227,8 +230,8 @@ class TauriGitSCMProvider extends Disposable implements ISCMProvider {
 		}
 		this.inputBoxTextModel = model;
 
-		this._stagedGroup = new TauriGitResourceGroup('staged', 'Staged Changes', this, uriIdentityService);
-		this._changesGroup = new TauriGitResourceGroup('changes', 'Changes', this, uriIdentityService);
+		this._stagedGroup = new TauriGitResourceGroup('staged', 'Staged Changes', this, uriIdentityService, true);
+		this._changesGroup = new TauriGitResourceGroup('changes', 'Changes', this, uriIdentityService, false);
 		this.groups = [this._stagedGroup, this._changesGroup];
 
 		this._register(this._onDidChangeResourceGroups);
@@ -473,6 +476,25 @@ class TauriGitContribution extends Disposable implements IWorkbenchContribution 
 		this._register(CommandsRegistry.registerCommand('tauri-git.openFile', async (_accessor, resource) => {
 			// No-op for now — would open the file in editor
 		}));
+
+		this._register(CommandsRegistry.registerCommand('tauri-git.unstageFile', async (_accessor, resource) => {
+			try {
+				if (resource?.sourceUri) {
+					const invoke = await getTauriInvoke();
+					if (invoke) {
+						await invoke('git_checkout', { path: rootPath, branch: 'HEAD -- ' + resource.sourceUri.fsPath });
+					}
+					await provider.refresh();
+				}
+			} catch (err) {
+				this.logService.error('[TauriGit] unstage file failed', err);
+			}
+		}));
+
+		this._register(CommandsRegistry.registerCommand('tauri-git.unstageAll', async () => {
+			// TODO: git reset HEAD to unstage all
+			await provider.refresh();
+		}));
 	}
 }
 
@@ -682,20 +704,31 @@ MenuRegistry.appendMenuItem(MenuId.SCMResourceGroupContext, {
 });
 
 // Register buttons on individual changed files (stage, discard, open)
+// Buttons on unstaged files: Open File, Discard, Stage
 MenuRegistry.appendMenuItem(MenuId.SCMResourceContext, {
 	command: { id: 'tauri-git.stageFile', title: 'Stage Changes', icon: ThemeIcon.fromId('add') },
 	group: 'inline',
 	order: 3,
+	when: ContextKeyExpr.equals('scmResourceGroup', 'changes'),
 });
 
 MenuRegistry.appendMenuItem(MenuId.SCMResourceContext, {
 	command: { id: 'tauri-git.discardFile', title: 'Discard Changes', icon: ThemeIcon.fromId('discard') },
 	group: 'inline',
 	order: 2,
+	when: ContextKeyExpr.equals('scmResourceGroup', 'changes'),
 });
 
 MenuRegistry.appendMenuItem(MenuId.SCMResourceContext, {
 	command: { id: 'tauri-git.openFile', title: 'Open File', icon: ThemeIcon.fromId('go-to-file') },
 	group: 'inline',
 	order: 1,
+});
+
+// Buttons on staged files: Open File, Unstage
+MenuRegistry.appendMenuItem(MenuId.SCMResourceContext, {
+	command: { id: 'tauri-git.unstageFile', title: 'Unstage Changes', icon: ThemeIcon.fromId('remove') },
+	group: 'inline',
+	order: 3,
+	when: ContextKeyExpr.equals('scmResourceGroup', 'staged'),
 });
