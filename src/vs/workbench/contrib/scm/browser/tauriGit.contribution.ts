@@ -247,16 +247,20 @@ class TauriGitSCMProvider extends Disposable implements ISCMProvider {
 		let status: TauriGitStatus | undefined;
 		try {
 			status = await invokeGit<TauriGitStatus>('git_status', { path: rootPath });
+			console.log('[TauriGit] git_status result:', status);
 		} catch (err) {
+			console.error('[TauriGit] git_status failed:', err);
 			this.logService.warn('[TauriGit] git_status failed', err);
 			return;
 		}
 
 		if (!status) {
+			console.log('[TauriGit] No status returned');
 			return;
 		}
 
 		this._branch = status.branch;
+		console.log('[TauriGit] Branch:', this._branch, 'Changes:', status.changes.length);
 
 		const stagedResources: ISCMResource[] = [];
 		const changesResources: ISCMResource[] = [];
