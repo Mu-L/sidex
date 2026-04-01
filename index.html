@@ -6,6 +6,10 @@
     <title>SideX</title>
     <script>
       // MUST run before any VSCode module — sets globals they depend on
+      // builtinExtensionsPath = 'vs/../../extensions' resolves relative to FILE_ROOT.
+      // In dev: FILE_ROOT=/src/, path becomes /src/vs/../../extensions = /extensions/
+      // In prod: FILE_ROOT=/src/, path becomes /src/vs/../../extensions = /extensions/
+      // Tauri serves dist/ at root, so /extensions/ maps to dist/extensions/
       globalThis._VSCODE_FILE_ROOT = window.location.origin + '/src/';
       globalThis._VSCODE_NLS_MESSAGES = [];
       globalThis._VSCODE_NLS_LANGUAGE = 'en';
