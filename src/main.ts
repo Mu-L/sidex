@@ -30,6 +30,23 @@ async function boot() {
 	const urlParams = new URLSearchParams(window.location.search);
 	const folderParam = urlParams.get('folder');
 
+	// Clear stale workbench state when folder changes to avoid editor restore errors
+	if (folderParam) {
+		const lastFolder = sessionStorage.getItem('sidex-last-folder');
+		if (lastFolder !== folderParam) {
+			sessionStorage.setItem('sidex-last-folder', folderParam);
+			// Clear IndexedDB workbench state to prevent stale editor tab errors
+			try {
+				const dbs = await indexedDB.databases();
+				for (const db of dbs) {
+					if (db.name && (db.name.includes('vscode-web-state') || db.name.includes('vscode-userdata'))) {
+						indexedDB.deleteDatabase(db.name);
+					}
+				}
+			} catch { /* ignore */ }
+		}
+	}
+
 	const options: any = {
 		windowIndicator: {
 			label: 'SideX',
