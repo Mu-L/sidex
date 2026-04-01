@@ -43,56 +43,11 @@ export default defineConfig({
     target: ['es2022', 'chrome100', 'safari15'],
     minify: !process.env.TAURI_DEBUG ? 'esbuild' : false,
     sourcemap: !!process.env.TAURI_DEBUG,
-    chunkSizeWarningLimit: 3000,
+    chunkSizeWarningLimit: 15000,
     rollupOptions: {
       output: {
-        manualChunks(id: string) {
-          if (id.includes('monaco-editor')) {
-            return 'monaco-editor';
-          }
-          if (id.includes('/contrib/notebook/') || id.includes('/services/notebook/')) {
-            return 'notebook';
-          }
-          if (id.includes('/contrib/chat/') || id.includes('/contrib/inlineChat/') ||
-              id.includes('/services/chat/') || id.includes('/contrib/mcp/')) {
-            return 'chat';
-          }
-          if (id.includes('/contrib/testing/')) {
-            return 'testing';
-          }
-          if (id.includes('/contrib/debug/')) {
-            return 'debug';
-          }
-          if (id.includes('/contrib/remote/') || id.includes('/services/remote/') ||
-              id.includes('/contrib/remoteCodingAgents/')) {
-            return 'remote';
-          }
-          if (id.includes('/contrib/interactive/') || id.includes('/contrib/replNotebook/')) {
-            return 'interactive';
-          }
-          if (id.includes('/contrib/terminal/') || id.includes('/services/terminal/') ||
-              id.includes('xterm')) {
-            return 'terminal';
-          }
-          if (id.includes('/contrib/search/') || id.includes('/services/search/') ||
-              id.includes('/contrib/searchEditor/')) {
-            return 'search';
-          }
-          if (id.includes('/contrib/scm/') || id.includes('/contrib/git/')) {
-            return 'scm';
-          }
-          if (id.includes('/contrib/extensions/') || id.includes('/services/extensionManagement/')) {
-            return 'extensions-mgmt';
-          }
-          if (id.includes('/contrib/welcomeGettingStarted/') || id.includes('/contrib/welcomeWalkthrough/') ||
-              id.includes('/contrib/welcomeViews/') || id.includes('/contrib/welcomeBanner/') ||
-              id.includes('/contrib/welcomeAgentSessions/')) {
-            return 'welcome';
-          }
-          if (id.includes('/contrib/mergeEditor/') || id.includes('/contrib/multiDiffEditor/')) {
-            return 'diff-editors';
-          }
-          return undefined;
+        manualChunks: {
+          'monaco-editor': ['monaco-editor'],
         },
       },
     },
