@@ -12,11 +12,10 @@ import { ConsoleLogInAutomationLogger } from '../../platform/log/browser/log.js'
 import { Disposable, DisposableStore, toDisposable } from '../../base/common/lifecycle.js';
 import { BrowserWorkbenchEnvironmentService, IBrowserWorkbenchEnvironmentService } from '../services/environment/browser/environmentService.js';
 import { Workbench } from './workbench.js';
-import { RemoteFileSystemProviderClient } from '../services/remote/common/remoteFileSystemProviderClient.js';
 import { IWorkbenchEnvironmentService } from '../services/environment/common/environmentService.js';
 import { IProductService } from '../../platform/product/common/productService.js';
 import product from '../../platform/product/common/product.js';
-import { RemoteAgentService } from '../services/remote/browser/remoteAgentService.js';
+import { NullRemoteAgentService } from '../services/remote/browser/nullRemoteAgentService.js';
 import { RemoteAuthorityResolverService } from '../../platform/remote/browser/remoteAuthorityResolverService.js';
 import { IRemoteAuthorityResolverService, RemoteConnectionType } from '../../platform/remote/common/remoteAuthorityResolver.js';
 import { IRemoteAgentService } from '../services/remote/common/remoteAgentService.js';
@@ -360,9 +359,8 @@ export class BrowserMain extends Disposable {
 		const remoteSocketFactoryService = new RemoteSocketFactoryService();
 		remoteSocketFactoryService.register(RemoteConnectionType.WebSocket, new BrowserSocketFactory(this.configuration.webSocketFactory));
 		serviceCollection.set(IRemoteSocketFactoryService, remoteSocketFactoryService);
-		const remoteAgentService = this._register(new RemoteAgentService(remoteSocketFactoryService, userDataProfileService, environmentService, productService, remoteAuthorityResolverService, signService, logService));
+		const remoteAgentService = new NullRemoteAgentService();
 		serviceCollection.set(IRemoteAgentService, remoteAgentService);
-		this._register(RemoteFileSystemProviderClient.register(remoteAgentService, fileService, logService));
 
 		// Default Account
 		const defaultAccountService = this._register(new DefaultAccountService(productService));
