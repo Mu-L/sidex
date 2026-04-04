@@ -169,7 +169,7 @@ class TauriPty extends Disposable implements ITerminalChildProcess {
 			} catch { }
 
 			this._onProcessReady.fire({ pid, cwd: this._cwd, windowsPty: undefined });
-			this._onDidChangeProperty.fire({ type: ProcessPropertyType.initialCwd, value: this._cwd });
+			this._onDidChangeProperty.fire({ type: ProcessPropertyType.InitialCwd, value: this._cwd });
 
 			const shellName = shellBasename || 'terminal';
 			this._onDidChangeProperty.fire({
@@ -221,6 +221,9 @@ class TauriPty extends Disposable implements ITerminalChildProcess {
 	async setUnicodeVersion(_version: '6' | '11'): Promise<void> { }
 
 	async refreshProperty<T extends ProcessPropertyType>(property: T): Promise<IProcessPropertyMap[T]> {
+		if (property === ProcessPropertyType.Cwd || property === ProcessPropertyType.InitialCwd) {
+			return this._cwd as IProcessPropertyMap[T];
+		}
 		throw new Error(`Unhandled property: ${property}`);
 	}
 
