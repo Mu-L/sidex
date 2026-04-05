@@ -939,6 +939,11 @@ class TauriGitContribution extends Disposable implements IWorkbenchContribution 
 
 		const rootUri = folders[0].uri;
 		const rootPath = rootUri.fsPath;
+		const originalProvider = new TauriGitOriginalFileProvider(rootPath);
+		try {
+			this._register(this.fileService.registerProvider(GIT_ORIGINAL_SCHEME, originalProvider));
+		} catch {
+		}
 
 		let isRepo: boolean | undefined;
 		try {
@@ -963,14 +968,6 @@ class TauriGitContribution extends Disposable implements IWorkbenchContribution 
 		const repository = this.scmService.registerSCMProvider(provider);
 		this._register(repository);
 		this._register(provider);
-
-		// Register the git-original file system provider for diff views
-		const originalProvider = new TauriGitOriginalFileProvider(rootPath);
-		try {
-			this._register(this.fileService.registerProvider(GIT_ORIGINAL_SCHEME, originalProvider));
-		} catch {
-			// Already registered from a previous init
-		}
 
 		// Set the commit message placeholder
 		repository.input.placeholder = `Message (⌘Enter to commit on "${provider.name}")`;
@@ -1243,7 +1240,7 @@ CommandsRegistry.registerCommand('git.openOnGitHub', async (_accessor, remoteUrl
 registerWorkbenchContribution2(
 	TauriGitContribution.ID,
 	TauriGitContribution,
-	WorkbenchPhase.AfterRestored,
+	WorkbenchPhase.BlockRestore,
 );
 
 // ─── Repository-level commands ──────────────────────────────────────────────
