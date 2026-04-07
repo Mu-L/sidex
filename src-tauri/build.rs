@@ -22,9 +22,15 @@ fn main() {
             let src = scripts_src.join(file);
             let dst = scripts_dst.join(file);
             if src.exists() {
-                fs::copy(&src, &dst).unwrap_or_else(|e| {
-                    panic!("Failed to copy {}: {}", file, e);
-                });
+                let src_bytes = fs::read(&src)
+                    .unwrap_or_else(|e| panic!("Failed to read {}: {}", file, e));
+                let needs_copy = fs::read(&dst)
+                    .map(|dst_bytes| dst_bytes != src_bytes)
+                    .unwrap_or(true);
+                if needs_copy {
+                    fs::write(&dst, &src_bytes)
+                        .unwrap_or_else(|e| panic!("Failed to copy {}: {}", file, e));
+                }
                 println!("cargo:rerun-if-changed={}", src.display());
             }
         }

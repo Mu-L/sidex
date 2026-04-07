@@ -34,6 +34,7 @@
 		const webviewOrigin = searchParams.get('origin');
 		const onElectron = searchParams.get('platform') === 'electron';
 		const disableServiceWorker = searchParams.has('disableServiceWorker');
+		const serviceWorkerProtocolSupported = location.protocol === 'http:' || location.protocol === 'https:';
 		const expectedWorkerVersion = parseInt(searchParams.get('swVersion'));
 
 		/**
@@ -247,7 +248,10 @@
 
 		/** @type {Promise<void>} */
 		const workerReady = new Promise((resolve, reject) => {
-			if (disableServiceWorker) {
+			if (disableServiceWorker || !serviceWorkerProtocolSupported) {
+				if (!disableServiceWorker && !serviceWorkerProtocolSupported) {
+					console.warn(`Service workers are not supported for protocol ${location.protocol}. Webview runs with service workers disabled.`);
+				}
 				return resolve();
 			}
 
@@ -488,7 +492,7 @@
 			reduceMotion: false,
 		};
 
-		if (!disableServiceWorker) {
+		if (!disableServiceWorker && serviceWorkerProtocolSupported) {
 			hostMessaging.onMessage('did-load-resource', (_event, data) => {
 				assertIsDefined(navigator.serviceWorker.controller).postMessage({ channel: 'did-load-resource', data }, data.data?.buffer ? [data.data.buffer] : []);
 			});

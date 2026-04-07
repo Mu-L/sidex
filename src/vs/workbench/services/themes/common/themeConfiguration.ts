@@ -282,19 +282,11 @@ const colorSchemeToPreferred = {
 };
 
 export class ThemeConfiguration {
-	constructor(private configurationService: IConfigurationService, private hostColorService: IHostColorSchemeService, private readonly isNewUser: boolean = false) {
+	constructor(private configurationService: IConfigurationService, private hostColorService: IHostColorSchemeService) {
 	}
 
 	private shouldAutoDetectColorScheme(): boolean {
-		const { value, userValue, userLocalValue, userRemoteValue } = this.configurationService.inspect<boolean>(ThemeSettings.DETECT_COLOR_SCHEME);
-		if (value) {
-			return true;
-		}
-		if (this.isNewUser) {
-			const hasUserScopedValue = userValue !== undefined || userLocalValue !== undefined || userRemoteValue !== undefined;
-			return !hasUserScopedValue;
-		}
-		return false;
+		return !!this.configurationService.getValue<boolean>(ThemeSettings.DETECT_COLOR_SCHEME);
 	}
 
 	public get colorTheme(): string {
