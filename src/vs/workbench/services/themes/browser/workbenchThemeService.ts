@@ -79,7 +79,7 @@ export class WorkbenchThemeService extends Disposable implements IWorkbenchTheme
 
 	private readonly container: HTMLElement;
 	private settings: ThemeConfiguration;
-
+	private static readonly AUTO_DETECT_MIGRATION_KEY = 'sidex.migration.v1.disableAutoDetectColorScheme';
 	private readonly colorThemeRegistry: ThemeRegistry<ColorThemeData>;
 	private currentColorTheme: ColorThemeData;
 	private readonly onColorThemeChange: Emitter<IWorkbenchColorTheme>;
@@ -118,8 +118,7 @@ export class WorkbenchThemeService extends Disposable implements IWorkbenchTheme
 	) {
 		super();
 		this.container = layoutService.mainContainer;
-		const isNewUser = this.storageService.isNew(StorageScope.APPLICATION);
-		this.settings = new ThemeConfiguration(configurationService, hostColorService, isNewUser);
+		this.settings = new ThemeConfiguration(configurationService, hostColorService);
 
 		this.colorThemeRegistry = this._register(new ThemeRegistry(colorThemesExtPoint, ColorThemeData.fromExtensionTheme));
 		this.colorThemeWatcher = this._register(new ThemeFileWatcher(fileService, environmentService, this.reloadCurrentColorTheme.bind(this)));
@@ -306,27 +305,19 @@ export class WorkbenchThemeService extends Disposable implements IWorkbenchTheme
 		}
 	}
 
-	/**
-	 * For new users who haven't explicitly configured `window.autoDetectColorScheme`,
-	 * persist `true` so that auto-detect becomes the default going forward.
-	 */
 	private async migrateAutoDetectColorScheme(): Promise<void> {
-		if (!this.storageService.isNew(StorageScope.APPLICATION)) {
+		if (this.storageService.getBoolean(WorkbenchThemeService.AUTO_DETECT_MIGRATION_KEY, StorageScope.APPLICATION, false)) {
 			return;
 		}
 
-		// Ensure that user data (including synced settings) has finished initializing
-		// so we do not overwrite values that arrive via settings sync.
 		await this.userDataInitializationService.whenInitializationFinished();
 
-		const inspection = this.configurationService.inspect<boolean>(ThemeSettings.DETECT_COLOR_SCHEME);
-
-		// Treat any of userValue, userLocalValue, or userRemoteValue as an explicit configuration.
-		if (inspection.userValue === undefined
-			&& inspection.userLocalValue === undefined
-			&& inspection.userRemoteValue === undefined) {
-			await this.configurationService.updateValue(ThemeSettings.DETECT_COLOR_SCHEME, true, ConfigurationTarget.USER);
+		const { userValue } = this.configurationService.inspect<boolean>(ThemeSettings.DETECT_COLOR_SCHEME);
+		if (userValue === true) {
+			await this.configurationService.updateValue(ThemeSettings.DETECT_COLOR_SCHEME, undefined, ConfigurationTarget.USER);
 		}
+
+		this.storageService.store(WorkbenchThemeService.AUTO_DETECT_MIGRATION_KEY, true, StorageScope.APPLICATION, StorageTarget.MACHINE);
 	}
 
 	private installConfigurationListener() {

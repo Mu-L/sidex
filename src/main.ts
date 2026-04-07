@@ -64,7 +64,10 @@ async function boot() {
 	}
 
 	const options: any = {
-		// Trusted domains — bypasses "open external website?" dialog
+		initialColorTheme: {
+			themeType: 'dark',
+		},
+
 		additionalTrustedDomains: [
 			'https://github.com',
 			'https://*.github.com',
@@ -313,11 +316,6 @@ function setupMenuActions() {
 	};
 
 	(window as any).__sidex_menu_action = async (menuId: string) => {
-		if (menuId === 'toggle_dev_tools') {
-			console.log('[SideX] Dev tools: use Ctrl+Shift+I / Cmd+Alt+I (handled natively by Tauri)');
-			return;
-		}
-
 		if (menuId === 'open_folder') {
 			sidexOpenFolder();
 			return;
