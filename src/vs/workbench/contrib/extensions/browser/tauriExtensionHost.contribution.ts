@@ -17,6 +17,7 @@ import { IEditorService } from '../../../services/editor/common/editorService.js
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
 import { ILanguageConfigurationService } from '../../../../editor/common/languages/languageConfigurationRegistry.js';
 import type { LanguageConfiguration } from '../../../../editor/common/languages/languageConfiguration.js';
+import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import type { ITextModel } from '../../../../editor/common/model.js';
 import type { Position } from '../../../../editor/common/core/position.js';
 import type { CancellationToken } from '../../../../base/common/cancellation.js';
@@ -53,6 +54,20 @@ import {
 import type { LanguageSelector } from '../../../../editor/common/languageSelector.js';
 import { URI } from '../../../../base/common/uri.js';
 import { Range } from '../../../../editor/common/core/range.js';
+import {
+	bootstrapExtensionPlatform,
+	wasmSyncDocument,
+	wasmCloseDocument,
+	wasmSyncWorkspaceFolders,
+	wasmProvideCompletionAll,
+	wasmProvideHoverAll,
+	wasmProvideDefinitionAll,
+	wasmProvideDocumentSymbolsAll,
+	wasmProvideFormattingAll,
+	type IExtensionPlatformBootstrap,
+	type IExtensionManifestSummary,
+} from './extensionPlatformClient.js';
+import { listen } from '@tauri-apps/api/event';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -78,6 +93,17 @@ function toVscRange(r: { start: { line: number; character: number }; end: { line
 	};
 }
 
+function isSyncedModelScheme(scheme: string): boolean {
+	return scheme === 'file' || scheme === 'vscode-file';
+}
+
+function sanitizeForExtHost(text: string): string {
+	return text
+		.replace(/\u00a0/g, ' ')
+		.replace(/[\u200b-\u200f\u202a-\u202e\u2060\ufeff]/g, '')
+		.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+}
+
 // ── Extension Host Contribution ───────────────────────────────────────────────
 
 interface HandshakeMessage {
@@ -99,9 +125,23 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 	private _msgId = 0;
 	private _reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 	private _reconnectAttempts = 0;
-	private _pendingCallbacks = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+	private _pendingCallbacks = new Map<number, {
+		resolve: (v: unknown) => void;
+		reject: (e: Error) => void;
+		timeoutHandle: ReturnType<typeof setTimeout>;
+		type: string;
+	}>();
 	private _connected = false;
+	private _handshakeSeen = false;
 	private _providerRegistrations: IDisposable[] = [];
+	private _documentsSyncInitialized = false;
+	private _activeEditorSyncInitialized = false;
+	private _modelContentListeners = new Map<string, IDisposable>();
+	private _tauriWatchListenerPromise: Promise<void> | undefined;
+	private _completionColdStart = true;
+	private _failureBurstLog = new Map<string, number>();
+
+	private _bootstrapExtensions: IExtensionManifestSummary[] = [];
 
 	constructor(
 		@ILogService private readonly logService: ILogService,
@@ -112,6 +152,7 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 		@IEditorService private readonly editorService: IEditorService,
 		@IQuickInputService private readonly quickInputService: IQuickInputService,
 		@ILanguageConfigurationService private readonly langConfigService: ILanguageConfigurationService,
+		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService,
 	) {
 		super();
 		this._init();
@@ -124,24 +165,288 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 			return;
 		}
 		try {
-			const { invoke } = await import('@tauri-apps/api/core');
-			const port = await invoke<number>('start_extension_host');
-			this._port = port;
-			this._connect(port);
-		} catch {
-			// Extension host is optional — silently skip if unavailable
+			const bootstrap = await bootstrapExtensionPlatform();
+			this._applyBootstrap(bootstrap);
+			this._connect(bootstrap.transport.endpoint);
+		} catch (error) {
+			this.logService.warn(`[ExtHost] platform bootstrap failed ${(error as Error)?.message ?? String(error)}`);
 		}
 	}
 
-	private _connect(port: number): void {
+	private _applyBootstrap(bootstrap: IExtensionPlatformBootstrap): void {
+		this._bootstrapExtensions = bootstrap.extensions || [];
+
+		const wasmExtensions = this._bootstrapExtensions.filter(e => e.kind === 'wasm');
+		if (wasmExtensions.length > 0) {
+			listen<number>('sidex-wasm-extensions-ready', () => {
+				this.logService.info('[ExtHost] WASM extensions ready');
+				this._syncDocumentsToWasm();
+				setTimeout(() => this._registerWasmProviders(), 200);
+			}).catch(() => {});
+		}
+
+		const workspaceFolders = this.workspaceContextService
+			.getWorkspace()
+			.folders
+			.map(folder => folder.uri)
+			.filter(uri => uri.scheme === 'file')
+			.map(uri => uri.fsPath);
+		if (workspaceFolders.length > 0) {
+			wasmSyncWorkspaceFolders(workspaceFolders).catch(() => {});
+		}
+
+		this._syncDocumentsToWasm();
+	}
+
+	// ── WASM Document Sync ────────────────────────────────────────────────────
+
+	private _wasmDocSyncInitialized = false;
+
+	private _syncDocumentsToWasm(): void {
+		for (const model of this.modelService.getModels()) {
+			if (isSyncedModelScheme(model.uri.scheme)) {
+				wasmSyncDocument(model.uri.toString(), model.getLanguageId(), sanitizeForExtHost(model.getValue())).catch(() => {});
+			}
+		}
+
+		if (this._wasmDocSyncInitialized) {
+			return;
+		}
+		this._wasmDocSyncInitialized = true;
+
+		this._register(this.modelService.onModelAdded(model => {
+			if (isSyncedModelScheme(model.uri.scheme)) {
+				wasmSyncDocument(model.uri.toString(), model.getLanguageId(), sanitizeForExtHost(model.getValue())).catch(() => {});
+			}
+		}));
+		this._register(this.modelService.onModelRemoved(model => {
+			if (isSyncedModelScheme(model.uri.scheme)) {
+				wasmCloseDocument(model.uri.toString()).catch(() => {});
+			}
+		}));
+
+		this._register(this.modelService.onModelAdded(model => {
+			if (!isSyncedModelScheme(model.uri.scheme)) {
+				return;
+			}
+			const key = `wasm-change-${model.uri.toString()}`;
+			if (this._modelContentListeners.has(key)) {
+				return;
+			}
+			const disposable = model.onDidChangeContent(() => {
+				wasmSyncDocument(model.uri.toString(), model.getLanguageId(), sanitizeForExtHost(model.getValue())).catch(() => {});
+			});
+			this._modelContentListeners.set(key, disposable);
+		}));
+		this._register(this.modelService.onModelRemoved(model => {
+			const key = `wasm-change-${model.uri.toString()}`;
+			const listener = this._modelContentListeners.get(key);
+			if (listener) {
+				listener.dispose();
+				this._modelContentListeners.delete(key);
+			}
+		}));
+	}
+
+	// ── WASM Provider Registration ────────────────────────────────────────────
+
+	private _wasmProviderRegistrations: IDisposable[] = [];
+
+	private _registerWasmProviders(): void {
+		this._wasmProviderRegistrations.forEach(d => d.dispose());
+		this._wasmProviderRegistrations = [];
+
+		const wasmLanguages: LanguageSelector = [
+			'css', 'scss', 'less',
+			'html', 'htm',
+			'json', 'jsonc',
+			'typescript', 'typescriptreact', 'javascript', 'javascriptreact',
+			'php',
+			'markdown',
+			'rust',
+			'go',
+			'c', 'cpp', 'objective-c', 'objective-cpp',
+			'python',
+		];
+
+		this._wasmProviderRegistrations.push(
+			this.languageFeatures.completionProvider.register(wasmLanguages, {
+				_debugDisplayName: 'wasmExtHost',
+				provideCompletionItems: async (model, position, context, _token) => {
+					try {
+						const result = await wasmProvideCompletionAll(
+							model.uri.toString(),
+							model.getLanguageId(),
+							model.getVersionId(),
+							position.lineNumber - 1,
+							position.column - 1,
+						);
+						if (!result?.items?.length) {
+							return null;
+						}
+
+						const lineContent = model.getLineContent(position.lineNumber);
+						const beforeCursor = lineContent.substring(0, position.column - 1);
+						let wordStart = beforeCursor.length;
+						while (wordStart > 0) {
+							const ch = beforeCursor[wordStart - 1];
+							if (/[\w\-$]/.test(ch)) {
+								wordStart--;
+							} else {
+								break;
+							}
+						}
+						const wordRange = {
+							startLineNumber: position.lineNumber,
+							startColumn: wordStart + 1,
+							endLineNumber: position.lineNumber,
+							endColumn: position.column,
+						};
+
+						const suggestions = this._normalizeCompletionItems(result.items);
+						for (const s of suggestions) {
+							if (!s.range) {
+								s.range = wordRange;
+							}
+							if (!s.filterText) {
+								s.filterText = s.label as string;
+							}
+						}
+						return suggestions.length > 0 ? { suggestions, incomplete: result.isIncomplete } : null;
+					} catch (e) {
+						this.logService.warn(`[WASM] completion error: ${(e as Error)?.message}`);
+						return null;
+					}
+				},
+			})
+		);
+
+		this._wasmProviderRegistrations.push(
+			this.languageFeatures.hoverProvider.register(wasmLanguages, {
+				provideHover: async (model, position, _token) => {
+					try {
+						const result = await wasmProvideHoverAll(
+							model.uri.toString(),
+							model.getLanguageId(),
+							model.getVersionId(),
+							position.lineNumber - 1,
+							position.column - 1,
+						);
+						if (!result?.contents?.length) {
+							return null;
+						}
+						const contents = result.contents.map((c: any) => {
+						let val = typeof c === 'string' ? c : String(c?.value ?? '');
+						val = val.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+					return { value: val };
+					});
+					const lspRange = result.range ? toVscRange(result.range) : undefined;
+						const wordRange = (() => {
+							const word = model.getWordAtPosition(position);
+							return word ? {
+								startLineNumber: position.lineNumber,
+								startColumn: word.startColumn,
+								endLineNumber: position.lineNumber,
+								endColumn: word.endColumn,
+							} : undefined;
+						})();
+						return {
+							contents,
+							range: lspRange ?? wordRange,
+						} satisfies Hover;
+					} catch (e) {
+						this.logService.warn(`[WASM] hover error: ${(e as Error)?.message}`);
+						return null;
+					}
+				},
+			})
+		);
+
+		this._wasmProviderRegistrations.push(
+			this.languageFeatures.definitionProvider.register(wasmLanguages, {
+				provideDefinition: async (model, position, _token) => {
+					try {
+						const result = await wasmProvideDefinitionAll(
+							model.uri.toString(),
+							model.getLanguageId(),
+							model.getVersionId(),
+							position.lineNumber - 1,
+							position.column - 1,
+						);
+						if (!Array.isArray(result) || !result.length) {
+							return null;
+						}
+						return result.map((l: any) => this._convertLocation(l));
+					} catch {
+						return null;
+					}
+				},
+			})
+		);
+
+		this._wasmProviderRegistrations.push(
+			this.languageFeatures.documentSymbolProvider.register(wasmLanguages, {
+				provideDocumentSymbols: async (model, _token) => {
+					try {
+						const result = await wasmProvideDocumentSymbolsAll(
+							model.uri.toString(),
+							model.getLanguageId(),
+							model.getVersionId(),
+						);
+						if (!Array.isArray(result) || !result.length) {
+							return null;
+						}
+						return result.map((s: any) => this._convertDocumentSymbol(s));
+					} catch {
+						return null;
+					}
+				},
+			})
+		);
+
+		this._wasmProviderRegistrations.push(
+			this.languageFeatures.documentFormattingEditProvider.register(wasmLanguages, {
+				provideDocumentFormattingEdits: async (model, options, _token) => {
+					try {
+						const result = await wasmProvideFormattingAll(
+							model.uri.toString(),
+							model.getLanguageId(),
+							model.getVersionId(),
+							options.tabSize,
+							options.insertSpaces,
+						);
+						if (!Array.isArray(result) || !result.length) {
+							return null;
+						}
+						return result.map((e: any) => ({ range: toVscRange(e.range), text: e.newText }));
+					} catch {
+						return null;
+					}
+				},
+			})
+		);
+
+		this.logService.info(`[ExtHost] WASM providers registered for: ${(wasmLanguages as string[]).join(', ')}`);
+	}
+
+	private _connect(endpoint: string): void {
 		try {
-			const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+			const url = new URL(endpoint);
+			this._port = Number(url.port) || undefined;
+			const ws = new WebSocket(endpoint);
 			this._ws = ws;
 
 			ws.onopen = () => {
 				this._connected = true;
+				this._handshakeSeen = false;
 				this._reconnectAttempts = 0;
-				this._send({ id: this._nextId(), type: 'initialize', params: { extensionPaths: [], workspaceFolders: [] } });
+				const workspaceFolders = this.workspaceContextService
+					.getWorkspace()
+					.folders
+					.map(folder => folder.uri)
+					.filter(uri => uri.scheme === 'file')
+					.map(uri => uri.fsPath);
+				this._send({ id: this._nextId(), type: 'initialize', params: { extensionPaths: [], workspaceFolders } });
 				this._syncOpenDocuments();
 				this._syncActiveEditor();
 			};
@@ -157,6 +462,9 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 			ws.onclose = () => {
 				this._ws = undefined;
 				this._connected = false;
+				this._handshakeSeen = false;
+				this._capabilitiesQueried = false;
+				this._rejectPending('connection closed');
 				this._scheduleReconnect();
 			};
 
@@ -180,7 +488,7 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 		this._reconnectTimer = setTimeout(() => {
 			this._reconnectTimer = undefined;
 			if (this._port && (!this._ws || this._ws.readyState === WebSocket.CLOSED)) {
-				this._connect(this._port);
+				this._connect(`ws://127.0.0.1:${this._port}`);
 			}
 		}, delay);
 	}
@@ -189,13 +497,19 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 		clearTimeout(this._reconnectTimer);
 		this._ws?.close();
 		this._ws = undefined;
-		for (const [, cb] of this._pendingCallbacks) {
-			cb.reject(new Error('disposed'));
-		}
-		this._pendingCallbacks.clear();
+		this._connected = false;
+		this._handshakeSeen = false;
+		this._rejectPending('disposed');
 		this._providerRegistrations.forEach(d => d.dispose());
+		this._wasmProviderRegistrations.forEach(d => d.dispose());
 		this._langConfigDisposables.forEach(d => d.dispose());
+		this._modelContentListeners.forEach(d => d.dispose());
+		this._modelContentListeners.clear();
 		this._tauriWatchUnlisten?.();
+		this._tauriWatchUnlisten = undefined;
+		this._tauriWatchListenerPromise = undefined;
+		clearTimeout(this._capabilityRetryTimer);
+		this._capabilityRetryTimer = undefined;
 		for (const [watcherId] of this._activeWatches) {
 			this._onStopFileWatch(watcherId);
 		}
@@ -214,27 +528,64 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 		}
 	}
 
-	private _request<T = unknown>(type: string, params?: Record<string, unknown>): Promise<T> {
+	private _rejectPending(reason: string): void {
+		for (const [, cb] of this._pendingCallbacks) {
+			clearTimeout(cb.timeoutHandle);
+			cb.reject(new Error(`ExtHost request '${cb.type}' failed: ${reason}`));
+		}
+		this._pendingCallbacks.clear();
+	}
+
+	private _shouldLogFailureBurst(key: string, burstMs = 5000): boolean {
+		const now = Date.now();
+		const last = this._failureBurstLog.get(key) ?? 0;
+		if (now - last < burstMs) {
+			return false;
+		}
+		this._failureBurstLog.set(key, now);
+		return true;
+	}
+
+	private _request<T = unknown>(
+		type: string,
+		params?: Record<string, unknown>,
+		options?: { timeoutMs?: number; allowBeforeHandshake?: boolean }
+	): Promise<T> {
+		if (!this._connected || this._ws?.readyState !== WebSocket.OPEN) {
+			return Promise.reject(new Error(`ExtHost request '${type}' skipped: connection not ready`));
+		}
+		if (!options?.allowBeforeHandshake && !this._handshakeSeen) {
+			return Promise.reject(new Error(`ExtHost request '${type}' skipped: handshake not ready`));
+		}
+		const timeoutMs = options?.timeoutMs ?? 10000;
 		return new Promise((resolve, reject) => {
 			const id = this._nextId();
-			this._pendingCallbacks.set(id, { resolve: resolve as (v: unknown) => void, reject });
-			this._send({ id, type, params });
-			setTimeout(() => {
+			const timeoutHandle = setTimeout(() => {
 				if (this._pendingCallbacks.delete(id)) {
-					reject(new Error(`ExtHost request '${type}' timed out`));
+					reject(new Error(`ExtHost request '${type}' timed out after ${timeoutMs}ms`));
 				}
-			}, 10000);
+			}, timeoutMs);
+			this._pendingCallbacks.set(id, {
+				resolve: resolve as (v: unknown) => void,
+				reject,
+				timeoutHandle,
+				type,
+			});
+			this._send({ id, type, params });
 		});
 	}
 
 	private _extensionCount = 0;
 	private _activatedCount = 0;
 	private _capabilitiesQueried = false;
+	private _capabilityRetryTimer: ReturnType<typeof setTimeout> | undefined;
+	private _capabilityRetryCount = 0;
 
 	private _handleMessage(msg: any): void {
 		if (msg.id !== undefined && this._pendingCallbacks.has(msg.id)) {
 			const cb = this._pendingCallbacks.get(msg.id)!;
 			this._pendingCallbacks.delete(msg.id);
+			clearTimeout(cb.timeoutHandle);
 			msg.error
 				? cb.reject(new Error(String(msg.error)))
 				: cb.resolve(msg.result);
@@ -247,10 +598,7 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 				break;
 			case 'extensionActivated':
 				this._activatedCount++;
-				if (!this._capabilitiesQueried && this._activatedCount >= this._extensionCount) {
-					this._capabilitiesQueried = true;
-					this._queryAndRegisterProviders();
-				}
+				this._queryAndRegisterProviders();
 				break;
 			case 'diagnosticsChanged':
 				this._onDiagnosticsChanged(msg.uri, msg.diagnostics);
@@ -286,9 +634,14 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 	}
 
 	private _onHandshake(msg: HandshakeMessage): void {
+		this._handshakeSeen = true;
 		this._extensionCount = msg.extensionCount;
 		this._activatedCount = 0;
 		this._capabilitiesQueried = false;
+		this._completionColdStart = true;
+		this._capabilityRetryCount = 0;
+		clearTimeout(this._capabilityRetryTimer);
+		this._capabilityRetryTimer = undefined;
 		this.logService.info(`[ExtHost] Connected — ${msg.extensionCount} extensions`);
 
 		// Activate each discovered extension
@@ -296,10 +649,9 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 			this._send({ id: this._nextId(), type: 'activateExtension', params: { extensionId: ext.id } });
 		}
 
-		// Fallback: query capabilities after 3s in case activate events are missed
+		// Query capabilities after 3s
 		setTimeout(() => {
 			if (!this._capabilitiesQueried) {
-				this._capabilitiesQueried = true;
 				this._queryAndRegisterProviders();
 			}
 		}, 3000);
@@ -308,6 +660,23 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 	private async _queryAndRegisterProviders(): Promise<void> {
 		try {
 			const caps = await this._request<ProviderCapabilities>('getProviderCapabilities');
+			if (!caps || Object.keys(caps).length === 0) {
+				if (!this._capabilitiesQueried && this._connected && this._capabilityRetryCount < 5) {
+					this._capabilityRetryCount++;
+					clearTimeout(this._capabilityRetryTimer);
+					this._capabilityRetryTimer = setTimeout(() => {
+						this._capabilityRetryTimer = undefined;
+						if (this._connected && !this._capabilitiesQueried) {
+							this._queryAndRegisterProviders();
+						}
+					}, 1000);
+				}
+				return;
+			}
+			this._capabilitiesQueried = true;
+			this._capabilityRetryCount = 0;
+			clearTimeout(this._capabilityRetryTimer);
+			this._capabilityRetryTimer = undefined;
 			this._registerProviders(caps);
 		} catch (e) {
 			this.logService.warn('[ExtHost] Could not get provider capabilities:', e);
@@ -315,7 +684,6 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 	}
 
 	private _registerProviders(caps: ProviderCapabilities): void {
-		// Dispose any previous registrations (e.g. after reconnect)
 		this._providerRegistrations.forEach(d => d.dispose());
 		this._providerRegistrations = [];
 
@@ -540,44 +908,260 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 		position: Position,
 		context: CompletionContext,
 	): Promise<CompletionList | null> {
+		const startedAt = Date.now();
+		const languageId = model.getLanguageId();
+		const uri = model.uri.toString();
+		const uriScheme = model.uri.scheme;
+		const pos = `${position.lineNumber}:${position.column}`;
+		if (!this._connected || !this._handshakeSeen) {
+			if (this._shouldLogFailureBurst('completion-skipped-not-ready')) {
+				this.logService.warn(`[ExtHost] completion skipped ${JSON.stringify({ languageId, uriScheme, uri, pos, reason: 'host-not-ready' })}`);
+			}
+			return null;
+		}
+
 		try {
+			const timeoutMs = this._completionColdStart ? 20000 : 10000;
 			const result = await this._request<{ items: any[] } | null>('provideCompletionItems', {
 				...modelToParams(model, position),
 				triggerCharacter: context.triggerCharacter,
-			});
-			if (!result?.items?.length) {
+				triggerKind: context.triggerKind,
+			}, { timeoutMs });
+			let suggestions = this._normalizeCompletionItems(result?.items ?? []);
+			if (suggestions.length === 0) {
+				const fallbackPositions = this._completionFallbackPositions(model, position);
+				for (const fallbackPos of fallbackPositions) {
+					const fallbackResult = await this._request<{ items: any[] } | null>('provideCompletionItems', {
+						...modelToParams(model, fallbackPos),
+						triggerCharacter: undefined,
+						triggerKind: context.triggerKind,
+					}, { timeoutMs: Math.min(timeoutMs, 4000) });
+					suggestions = this._normalizeCompletionItems(fallbackResult?.items ?? []);
+					if (suggestions.length > 0) {
+						break;
+					}
+				}
+			}
+			if (suggestions.length === 0) {
+				suggestions = this._fallbackCompletions(model, position);
+			}
+			this._completionColdStart = false;
+			if (!suggestions.length) {
 				return null;
 			}
 			return {
-				suggestions: result.items.map(item => this._convertCompletionItem(item)),
+				suggestions,
 				incomplete: false,
 			};
-		} catch {
+		} catch (error) {
+			const latencyMs = Date.now() - startedAt;
+			if (this._shouldLogFailureBurst('completion-error')) {
+				this.logService.warn(`[ExtHost] completion error ${JSON.stringify({
+					languageId,
+					uriScheme,
+					pos,
+					latencyMs,
+					error: error instanceof Error ? error.message : String(error),
+				})}`);
+			}
 			return null;
 		}
+	}
+
+	private _completionFallbackPositions(model: ITextModel, position: Position): Position[] {
+		const positions: Position[] = [];
+		const seen = new Set<string>();
+		const push = (lineNumber: number, column: number) => {
+			if (lineNumber < 1 || lineNumber > model.getLineCount()) {
+				return;
+			}
+			const maxCol = model.getLineMaxColumn(lineNumber);
+			const clampedCol = Math.max(1, Math.min(column, maxCol));
+			const key = `${lineNumber}:${clampedCol}`;
+			if (seen.has(key)) {
+				return;
+			}
+			seen.add(key);
+			positions.push({ lineNumber, column: clampedCol } as Position);
+		};
+
+		const wordUntil = model.getWordUntilPosition(position);
+		if (wordUntil && wordUntil.startColumn > 0 && wordUntil.startColumn < position.column) {
+			push(position.lineNumber, wordUntil.startColumn);
+		}
+		if (position.column > 2) {
+			push(position.lineNumber, position.column - 1);
+		}
+		const lineContent = model.getLineContent(position.lineNumber);
+		const trimmed = lineContent.trim();
+		if (trimmed.includes('{') && !trimmed.includes(':')) {
+			const firstSelectorChar = lineContent.search(/\S/);
+			if (firstSelectorChar >= 0) {
+				push(position.lineNumber, firstSelectorChar + 2);
+			}
+			const braceIndex = lineContent.indexOf('{');
+			if (braceIndex > 0) {
+				push(position.lineNumber, braceIndex + 1);
+			}
+		}
+		return positions;
+	}
+
+	private _fallbackCompletions(model: ITextModel, position: Position): CompletionItem[] {
+		const languageId = model.getLanguageId();
+		const word = model.getWordUntilPosition(position);
+		const prefix = (word?.word ?? '').toLowerCase();
+		if (prefix.length === 0) {
+			return [];
+		}
+
+		const seen = new Set<string>();
+		const out: CompletionItem[] = [];
+		const push = (label: string, kind = CompletionItemKind.Text) => {
+			if (!label || label.toLowerCase() === prefix || seen.has(label)) {
+				return;
+			}
+			if (!label.toLowerCase().startsWith(prefix)) {
+				return;
+			}
+			seen.add(label);
+			out.push({
+				label,
+				kind,
+				insertText: label,
+				range: {
+					startLineNumber: position.lineNumber,
+					startColumn: word.startColumn,
+					endLineNumber: position.lineNumber,
+					endColumn: word.endColumn,
+				},
+			} as CompletionItem);
+		};
+
+		const text = sanitizeForExtHost(model.getValue());
+		const re = /[A-Za-z_][$\w-]{2,}/g;
+		let m: RegExpExecArray | null = null;
+		while ((m = re.exec(text)) !== null) {
+			push(m[0], CompletionItemKind.Text);
+			if (out.length >= 300) {
+				break;
+			}
+		}
+
+		if (languageId === 'typescript' || languageId === 'typescriptreact' || languageId === 'javascript' || languageId === 'javascriptreact') {
+			for (const kw of ['const', 'let', 'var', 'function', 'return', 'import', 'from', 'export', 'default', 'if', 'else', 'for', 'while', 'switch', 'case', 'break', 'continue', 'try', 'catch', 'finally', 'class', 'extends', 'implements', 'interface', 'type', 'async', 'await', 'new', 'this', 'super']) {
+				push(kw, CompletionItemKind.Keyword);
+			}
+		}
+
+		if (out.length > 0 && this._shouldLogFailureBurst('completion-local-fallback', 3000)) {
+			this.logService.info(`[ExtHost] completion local-fallback ${JSON.stringify({ languageId, prefix, count: out.length })}`);
+		}
+		return out;
+	}
+
+	private _escapeForRegExp(value: string): string {
+		return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+	}
+
+	private _fallbackHover(model: ITextModel, position: Position): Hover | null {
+		const word = model.getWordAtPosition(position);
+		if (!word?.word) {
+			return null;
+		}
+
+		const escaped = this._escapeForRegExp(word.word);
+		const occurrenceCount = (sanitizeForExtHost(model.getValue()).match(new RegExp(`\\b${escaped}\\b`, 'g')) || []).length;
+		const label = occurrenceCount === 1 ? 'occurrence' : 'occurrences';
+		const hover: Hover = {
+			contents: [
+				{ value: `\`${word.word}\`` },
+				{ value: `${occurrenceCount} ${label} in file` },
+			],
+			range: {
+				startLineNumber: position.lineNumber,
+				startColumn: word.startColumn,
+				endLineNumber: position.lineNumber,
+				endColumn: word.endColumn,
+			},
+		};
+
+		if (this._shouldLogFailureBurst('hover-local-fallback', 3000)) {
+			this.logService.info(`[ExtHost] hover local-fallback ${JSON.stringify({ languageId: model.getLanguageId(), word: word.word })}`);
+		}
+		return hover;
+	}
+
+	private _fallbackDefinition(model: ITextModel, position: Position): Location | Location[] | null {
+		const word = model.getWordAtPosition(position);
+		if (!word?.word) {
+			return null;
+		}
+
+		const escaped = this._escapeForRegExp(word.word);
+		const declarationPatterns = [
+			new RegExp(`\\b(?:const|let|var)\\s+${escaped}\\b`),
+			new RegExp(`\\bfunction\\s+${escaped}\\b`),
+			new RegExp(`\\bclass\\s+${escaped}\\b`),
+			new RegExp(`\\binterface\\s+${escaped}\\b`),
+			new RegExp(`\\btype\\s+${escaped}\\b`),
+			new RegExp(`\\b(?:export\\s+)?(?:default\\s+)?${escaped}\\s*[:=]\\s*`),
+		];
+
+		for (let lineNumber = 1; lineNumber <= model.getLineCount(); lineNumber++) {
+			const line = model.getLineContent(lineNumber);
+			for (const pattern of declarationPatterns) {
+				const match = pattern.exec(line);
+				if (!match) {
+					continue;
+				}
+
+				const symbolIndex = line.indexOf(word.word, match.index);
+				if (symbolIndex < 0) {
+					continue;
+				}
+
+				const location: Location = {
+					uri: model.uri,
+					range: new Range(lineNumber, symbolIndex + 1, lineNumber, symbolIndex + 1 + word.word.length),
+				};
+				if (this._shouldLogFailureBurst('definition-local-fallback', 3000)) {
+					this.logService.info(`[ExtHost] definition local-fallback ${JSON.stringify({ languageId: model.getLanguageId(), word: word.word, lineNumber })}`);
+				}
+				return location;
+			}
+		}
+
+		return null;
 	}
 
 	private async _provideHover(model: ITextModel, position: Position): Promise<Hover | null> {
 		try {
 			const result = await this._request<{ contents: any[]; range?: any } | null>('provideHover', modelToParams(model, position));
 			if (!result?.contents?.length) {
-				return null;
+				return this._fallbackHover(model, position);
 			}
 			return {
 				contents: result.contents.map(c => ({ value: typeof c === 'string' ? c : String(c?.value ?? '') })),
 				range: result.range ? toVscRange(result.range) : undefined,
 			};
-		} catch {
-			return null;
+		} catch (error) {
+			if (this._shouldLogFailureBurst('hover-error', 3000)) {
+				this.logService.warn(`[ExtHost] hover error ${(error as Error)?.message ?? String(error)}`);
+			}
+			return this._fallbackHover(model, position);
 		}
 	}
 
 	private async _provideDefinition(model: ITextModel, position: Position): Promise<Location | Location[] | null> {
 		try {
 			const result = await this._request<any>('provideDefinition', modelToParams(model, position));
-			return result ? this._convertLocations(result) : null;
-		} catch {
-			return null;
+			return result ? this._convertLocations(result) : this._fallbackDefinition(model, position);
+		} catch (error) {
+			if (this._shouldLogFailureBurst('definition-error', 3000)) {
+				this.logService.warn(`[ExtHost] definition error ${(error as Error)?.message ?? String(error)}`);
+			}
+			return this._fallbackDefinition(model, position);
 		}
 	}
 
@@ -860,29 +1444,38 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 	// ── Document Synchronisation ──────────────────────────────────────────────
 
 	private _syncOpenDocuments(): void {
-		// Notify extension host about all currently open models
-		for (const model of this.modelService.getModels()) {
-			if (model.uri.scheme === 'file') {
-				this._notifyDocumentOpened(model);
-			}
+		if (!this._documentsSyncInitialized) {
+			this._documentsSyncInitialized = true;
+			this._register(this.modelService.onModelAdded(model => {
+				if (isSyncedModelScheme(model.uri.scheme)) {
+					this._notifyDocumentOpened(model);
+					this._trackDocumentChanges(model);
+				}
+			}));
+			this._register(this.modelService.onModelRemoved(model => {
+				if (!isSyncedModelScheme(model.uri.scheme)) {
+					return;
+				}
+				const uri = model.uri.toString();
+				const listener = this._modelContentListeners.get(uri);
+				if (listener) {
+					listener.dispose();
+					this._modelContentListeners.delete(uri);
+				}
+				this._send({ id: this._nextId(), type: 'documentClosed', params: { uri } });
+			}));
 		}
 
-		// Listen for new models
-		this._register(this.modelService.onModelAdded(model => {
-			if (model.uri.scheme === 'file') {
+		for (const model of this.modelService.getModels()) {
+			if (isSyncedModelScheme(model.uri.scheme)) {
 				this._notifyDocumentOpened(model);
+				this._trackDocumentChanges(model);
 			}
-		}));
-
-		// Listen for model changes
-		this._register(this.modelService.onModelRemoved(model => {
-			if (model.uri.scheme === 'file') {
-				this._send({ id: this._nextId(), type: 'documentClosed', params: { uri: model.uri.toString() } });
-			}
-		}));
+		}
 	}
 
 	private _notifyDocumentOpened(model: ITextModel): void {
+		const text = sanitizeForExtHost(model.getValue());
 		this._send({
 			id: this._nextId(),
 			type: 'documentOpened',
@@ -890,34 +1483,72 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 				uri: model.uri.toString(),
 				languageId: model.getLanguageId(),
 				version: model.getVersionId(),
-				text: model.getValue(),
+				text,
 			},
 		});
+	}
 
-		// Track changes after open
-		this._register(model.onDidChangeContent(e => {
+	private _trackDocumentChanges(model: ITextModel): void {
+		const uri = model.uri.toString();
+		if (this._modelContentListeners.has(uri)) {
+			return;
+		}
+		const disposable = model.onDidChangeContent(e => {
+			if (!this._connected) {
+				return;
+			}
+			const changes = e.changes.map(c => ({
+				range: {
+					start: { line: c.range.startLineNumber - 1, character: c.range.startColumn - 1 },
+					end: { line: c.range.endLineNumber - 1, character: c.range.endColumn - 1 },
+				},
+				rangeOffset: c.rangeOffset,
+				rangeLength: c.rangeLength,
+				text: sanitizeForExtHost(c.text),
+			}));
+			const text = sanitizeForExtHost(model.getValue());
+			this._send({
+				id: this._nextId(),
+				type: 'documentChanged',
+				params: {
+					uri: model.uri.toString(),
+					version: model.getVersionId(),
+					text,
+					changes,
+				},
+			});
+		});
+		this._modelContentListeners.set(uri, disposable);
+	}
+
+	private _syncActiveEditor(): void {
+		this._sendActiveEditor();
+		if (this._activeEditorSyncInitialized) {
+			return;
+		}
+		this._activeEditorSyncInitialized = true;
+		this._register(this.editorService.onDidActiveEditorChange(() => {
 			if (this._connected) {
-				const changes = e.changes.map(c => ({
-					range: {
-						start: { line: c.range.startLineNumber - 1, character: c.range.startColumn - 1 },
-						end: { line: c.range.endLineNumber - 1, character: c.range.endColumn - 1 },
-					},
-					rangeOffset: c.rangeOffset,
-					rangeLength: c.rangeLength,
-					text: c.text,
-				}));
-				this._send({
-					id: this._nextId(),
-					type: 'documentChanged',
-					params: {
-						uri: model.uri.toString(),
-						version: model.getVersionId(),
-						text: model.getValue(),
-						changes,
-					},
-				});
+				this._sendActiveEditor();
 			}
 		}));
+	}
+
+	private _sendActiveEditor(): void {
+		const editor = this.editorService.activeTextEditorControl;
+		const model = editor && 'getModel' in editor ? (editor as any).getModel() as ITextModel | null : null;
+		if (model?.uri && isSyncedModelScheme(model.uri.scheme)) {
+			this._send({
+				id: this._nextId(),
+				type: 'activeEditorChanged',
+				params: {
+					uri: model.uri.toString(),
+					languageId: model.getLanguageId(),
+				},
+			});
+		} else {
+			this._send({ id: this._nextId(), type: 'activeEditorChanged', params: { uri: null } });
+		}
 	}
 
 	// ── Diagnostics ───────────────────────────────────────────────────────────
@@ -981,33 +1612,6 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 		}
 	}
 
-	// ── Active Editor Sync ────────────────────────────────────────────────────
-
-	private _syncActiveEditor(): void {
-		const sendActive = () => {
-			const editor = this.editorService.activeTextEditorControl;
-			const model = editor && 'getModel' in editor ? (editor as any).getModel() as ITextModel | null : null;
-			if (model && model.uri.scheme === 'file') {
-				this._send({
-					id: this._nextId(),
-					type: 'activeEditorChanged',
-					params: {
-						uri: model.uri.toString(),
-						languageId: model.getLanguageId(),
-					},
-				});
-			} else {
-				this._send({ id: this._nextId(), type: 'activeEditorChanged', params: { uri: null } });
-			}
-		};
-		sendActive();
-		this._register(this.editorService.onDidActiveEditorChange(() => {
-			if (this._connected) {
-				sendActive();
-			}
-		}));
-	}
-
 	// ── Quick Pick / Input Box / Message Request ──────────────────────────────
 
 	private async _onShowQuickPick(requestId: number, items: string[], options: any): Promise<void> {
@@ -1036,7 +1640,6 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 	}
 
 	private async _onShowMessageRequest(requestId: number, severity: string, message: string, items: string[]): Promise<void> {
-		// Use the quick input service to show choices
 		if (!items?.length) {
 			return;
 		}
@@ -1060,7 +1663,6 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 		if (!language || !config) {
 			return;
 		}
-		// Dispose previous registration for this language
 		this._langConfigDisposables.get(language)?.dispose();
 
 		const langConfig: LanguageConfiguration = {};
@@ -1104,7 +1706,6 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 		try {
 			const { invoke } = await import('@tauri-apps/api/core');
 
-			// Extract file extensions from the glob pattern for Tauri's watch_start
 			let fileExtensions: string[] | undefined;
 			const extMatch = pattern.match(/\*\.(\w+)$/);
 			if (extMatch) {
@@ -1124,10 +1725,13 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 			this._activeWatches.set(watcherId, tauriWatchId);
 			this.logService.info(`[ExtHost] File watch ${watcherId} started (tauri=${tauriWatchId}) for ${pattern}`);
 
-			// Start listening for Tauri watch events if not already
-			if (!this._tauriWatchUnlisten) {
-				this._setupTauriWatchListener();
+			if (!this._tauriWatchUnlisten && !this._tauriWatchListenerPromise) {
+				this._tauriWatchListenerPromise = this._setupTauriWatchListener()
+					.finally(() => {
+						this._tauriWatchListenerPromise = undefined;
+					});
 			}
+			await this._tauriWatchListenerPromise;
 		} catch (e) {
 			this.logService.warn(`[ExtHost] Failed to start file watch for ${pattern}:`, e);
 		}
@@ -1149,6 +1753,9 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 	}
 
 	private async _setupTauriWatchListener(): Promise<void> {
+		if (this._tauriWatchUnlisten) {
+			return;
+		}
 		try {
 			const { listen } = await import('@tauri-apps/api/event');
 			const unlisten = await listen<{ watch_id: number; events: { path: string; kind: string; is_dir: boolean }[] }>('watch-batch', (event) => {
@@ -1236,17 +1843,56 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 
 	// ── Conversion Helpers ────────────────────────────────────────────────────
 
-	private _convertCompletionItem(item: any): CompletionItem {
+	private _normalizeCompletionItems(items: any[]): CompletionItem[] {
+		const normalized: CompletionItem[] = [];
+		let dropped = 0;
+		for (const item of items) {
+			const converted = this._tryConvertCompletionItem(item);
+			if (converted) {
+				normalized.push(converted);
+			} else {
+				dropped++;
+			}
+		}
+		if (dropped > 0 && this._shouldLogFailureBurst('completion-dropped-items', 10000)) {
+			this.logService.warn(`[ExtHost] completion dropped malformed items ${JSON.stringify({ dropped, accepted: normalized.length })}`);
+		}
+		return normalized;
+	}
+
+	private _tryConvertCompletionItem(item: any): CompletionItem | null {
+		const label = typeof item?.label === 'string'
+			? item.label
+			: (typeof item?.label?.label === 'string' ? item.label.label : '');
+		if (!label.trim()) {
+			return null;
+		}
+
+		let range: CompletionItem['range'] = undefined;
+		if (item.range) {
+			try {
+				range = toVscRange(item.range);
+			} catch {
+				range = undefined;
+			}
+		}
+
+		const documentationValue = item.documentation === undefined || item.documentation === null
+			? undefined
+			: (typeof item.documentation === 'string'
+				? item.documentation
+				: (typeof item.documentation?.value === 'string' ? item.documentation.value : String(item.documentation)));
+
 		return {
-			label: item.label,
-			kind: item.kind ?? CompletionItemKind.Text,
-			detail: item.detail,
-			documentation: item.documentation ? { value: String(item.documentation) } : undefined,
-			insertText: item.insertText ?? item.label,
-			range: item.range ? toVscRange(item.range) : undefined,
-			sortText: item.sortText,
-			filterText: item.filterText,
-			preselect: item.preselect,
+			label,
+			kind: typeof item.kind === 'number' ? item.kind : CompletionItemKind.Text,
+			detail: typeof item.detail === 'string' ? item.detail : undefined,
+			documentation: documentationValue ? { value: documentationValue } : undefined,
+			insertText: typeof item.insertText === 'string' && item.insertText.length > 0 ? item.insertText : label,
+			range,
+			sortText: typeof item.sortText === 'string' ? item.sortText : undefined,
+			filterText: typeof item.filterText === 'string' ? item.filterText : undefined,
+			preselect: Boolean(item.preselect),
 		} as CompletionItem;
 	}
 
