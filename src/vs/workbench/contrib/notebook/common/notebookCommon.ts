@@ -151,3 +151,57 @@ export interface IWorkspaceNotebookCellEdit {
 }
 
 export type NotebookPriorityInfo = { filenamePattern?: string };
+
+export namespace CellUri {
+	export function generate(notebook: URI, handle: number): URI {
+		return notebook.with({ scheme: 'vscode-notebook-cell', fragment: `${handle}` });
+	}
+	export function parse(cell: URI): { notebook: URI; handle: number } | undefined {
+		if (cell.scheme !== 'vscode-notebook-cell') { return undefined; }
+		const match = /^(\d+)$/.exec(cell.fragment);
+		if (!match) { return undefined; }
+		return { notebook: cell.with({ scheme: cell.query || 'file', fragment: '' }), handle: parseInt(match[1], 10) };
+	}
+}
+
+export interface IResolvedNotebookEditorModel {
+	readonly uri: URI;
+	readonly notebook: unknown;
+}
+
+export interface INotebookExclusiveDocumentFilter {
+	include?: string;
+	exclude?: string;
+}
+
+export const enum NotebookFindScopeType {
+	None = 0,
+	Cells = 1,
+	Text = 2,
+}
+
+export const enum NotebookSetting {
+	displayOrder = 'notebook.displayOrder',
+	cellToolbarLocation = 'notebook.cellToolbarLocation',
+	showCellStatusBar = 'notebook.showCellStatusBar',
+	compactView = 'notebook.compactView',
+	focusIndicator = 'notebook.cellFocusIndicator',
+	insertToolbarLocation = 'notebook.insertToolbarLocation',
+	globalToolbar = 'notebook.globalToolbar',
+	consolidatedOutputButton = 'notebook.consolidatedOutputButton',
+	showFoldingControls = 'notebook.showFoldingControls',
+	dragAndDropEnabled = 'notebook.dragAndDropEnabled',
+	formatOnSave = 'notebook.formatOnSave.enabled',
+	formatOnCellExecution = 'notebook.formatOnCellExecution',
+	codeActionsOnSave = 'notebook.codeActionsOnSave',
+	outputWordWrap = 'notebook.output.wordWrap',
+	outputScrolling = 'notebook.output.scrolling',
+	outputFontSize = 'notebook.output.fontSize',
+	outputFontFamily = 'notebook.output.fontFamily',
+	outputLineHeight = 'notebook.output.lineHeight',
+	textOutputLineLimit = 'notebook.output.textLineLimit',
+	cellChat = 'notebook.experimental.cellChat',
+}
+
+export const INTERACTIVE_WINDOW_EDITOR_ID = 'interactive';
+export const REPL_EDITOR_ID = 'repl';
