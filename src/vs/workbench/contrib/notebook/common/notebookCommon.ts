@@ -205,3 +205,27 @@ export const enum NotebookSetting {
 
 export const INTERACTIVE_WINDOW_EDITOR_ID = 'interactive';
 export const REPL_EDITOR_ID = 'repl';
+
+export const enum SelectionStateType {
+	Handle = 0,
+	Index = 1,
+}
+
+export interface ISelectionState {
+	kind: SelectionStateType;
+	focus: { start: number; end: number };
+	selections: { start: number; end: number }[];
+}
+
+export interface ICellPartialMetadataEdit {
+	editType: CellEditType.PartialMetadata;
+	index: number;
+	metadata: Record<string, unknown>;
+}
+
+export interface ICellReplaceEdit {
+	editType: CellEditType.Replace;
+	index: number;
+	count: number;
+	cells: unknown[];
+}

@@ -13,10 +13,14 @@ const ALLOWED_HOSTS: &[&str] = &[
     "marketplace.visualstudio.com",
     "az764295.vo.msecnd.net",
     "vscode-unpkg.net",
+    "gallery.vsassets.io",
+    "vsmarketplacebadges.dev",
+    "vscode.blob.core.windows.net",
     "github.com",
     "raw.githubusercontent.com",
     "objects.githubusercontent.com",
     "update.code.visualstudio.com",
+    "codeload.github.com",
 ];
 
 fn validate_url(url: &str) -> Result<reqwest::Url, String> {

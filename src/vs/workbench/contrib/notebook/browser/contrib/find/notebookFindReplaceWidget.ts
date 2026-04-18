@@ -1,13 +1,14 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  SideX - A fast, native code editor
+ *  Copyright (c) Siden Technologies, Inc. MIT Licensed.
  *--------------------------------------------------------------------------------------------*/
 
 import { Disposable } from '../../../../../../base/common/lifecycle.js';
 import type { NotebookFindFilters } from './findFilters.js';
 
 export class NotebookFindInputFilterButton extends Disposable {
-	readonly container: HTMLElement;
+	readonly container: HTMLElement = document.createElement('div');
+	visible: boolean = false;
 
 	constructor(
 		_filters: NotebookFindFilters,
@@ -17,10 +18,11 @@ export class NotebookFindInputFilterButton extends Disposable {
 		_label?: string,
 	) {
 		super();
-		this.container = document.createElement('div');
 	}
 
-	get width(): number {
+	width(): number {
 		return 0;
 	}
+
+	applyStyles(_checked: boolean): void { }
 }

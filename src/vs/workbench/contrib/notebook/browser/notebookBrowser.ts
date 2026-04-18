@@ -1,6 +1,6 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  SideX - A fast, native code editor
+ *  Copyright (c) Siden Technologies, Inc. MIT Licensed.
  *--------------------------------------------------------------------------------------------*/
 
 export interface ICellViewModel {
@@ -12,6 +12,10 @@ export interface ICellViewModel {
 	getText(): string;
 }
 
+export interface CellWebviewFindMatch {
+	readonly index: number;
+}
+
 export interface CellFindMatchWithIndex {
 	cell: ICellViewModel;
 	index: number;
@@ -20,13 +24,6 @@ export interface CellFindMatchWithIndex {
 	webviewMatches: CellWebviewFindMatch[];
 }
 
-export interface CellWebviewFindMatch {
-	readonly index: number;
+export function getNotebookEditorFromEditorPane(_editorPane: any): any {
+	return undefined;
 }
-
-export interface INotebookEditorCreationOptions {
-	readonly isSimpleWidget?: boolean;
-}
-
-export const EXPAND_CELL_INPUT_COMMAND_ID = 'notebook.cell.expandCellInput';
-export const EXPAND_CELL_OUTPUT_COMMAND_ID = 'notebook.cell.expandCellOutput';

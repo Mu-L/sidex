@@ -83,6 +83,7 @@ import type { InstallExtensionResult, IGalleryExtension } from '../../../../plat
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IWebviewViewService } from '../../webviewView/browser/webviewViewService.js';
+import { ExtensionIdentifier } from '../../../../platform/extensions/common/extensions.js';
 import { IWebviewService } from '../../webview/browser/webview.js';
 import { ICodeEditorService } from '../../../../editor/browser/services/codeEditorService.js';
 import type { ICodeEditor } from '../../../../editor/browser/editorBrowser.js';
@@ -155,6 +156,7 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 	private _documentsSyncInitialized = false;
 	private _activeEditorSyncInitialized = false;
 	private _editorTrackingInitialized = false;
+	private _initialEditorsDeltaSent = false;
 	private _trackedEditors = new Map<string, { editor: ICodeEditor; uri: string; listeners: IDisposable[] }>();
 	private _activeTrackedEditorId: string | null = null;
 	private _decorationTypes = new Map<string, IDisposable>();
@@ -1239,6 +1241,19 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 			return unique.length > 0 ? unique as LanguageSelector : '*';
 		};
 
+		// SideX: New capability format — `{selector, extensionId, displayName}[]`.
+		// Old format was just `selector[][]` (arrays of selectors). Normalize.
+		const normalizeProviders = (raw: any): Array<{ selector: unknown[]; extensionId?: string; displayName?: string }> => {
+			if (!Array.isArray(raw)) { return []; }
+			return raw.map((entry: any) => {
+				if (entry && typeof entry === 'object' && 'selector' in entry) {
+					return { selector: entry.selector, extensionId: entry.extensionId, displayName: entry.displayName };
+				}
+				// Legacy: the entry IS the selector array
+				return { selector: entry };
+			});
+		};
+
 		if (caps.completion) {
 			this._providerRegistrations.push(
 				this.languageFeatures.completionProvider.register(selectors(caps.completion), {
@@ -1331,21 +1346,31 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 		}
 
 		if (caps.formatting) {
-			this._providerRegistrations.push(
-				this.languageFeatures.documentFormattingEditProvider.register(selectors(caps.formatting), {
-					provideDocumentFormattingEdits: (model, options, _token) =>
-						this._provideFormatting(model, options),
-				})
-			);
+			const formatters = normalizeProviders(caps.formatting);
+			for (const f of formatters) {
+				this._providerRegistrations.push(
+					this.languageFeatures.documentFormattingEditProvider.register(selectors([f.selector as unknown[]]), {
+						extensionId: f.extensionId ? new ExtensionIdentifier(f.extensionId) : undefined,
+						displayName: f.displayName,
+						provideDocumentFormattingEdits: (model, options, _token) =>
+							this._provideFormatting(model, options),
+					} as any)
+				);
+			}
 		}
 
 		if (caps.rangeFormatting) {
-			this._providerRegistrations.push(
-				this.languageFeatures.documentRangeFormattingEditProvider.register(selectors(caps.rangeFormatting), {
-					provideDocumentRangeFormattingEdits: (model, range, options, _token) =>
-						this._provideRangeFormatting(model, range, options),
-				})
-			);
+			const formatters = normalizeProviders(caps.rangeFormatting);
+			for (const f of formatters) {
+				this._providerRegistrations.push(
+					this.languageFeatures.documentRangeFormattingEditProvider.register(selectors([f.selector as unknown[]]), {
+						extensionId: f.extensionId ? new ExtensionIdentifier(f.extensionId) : undefined,
+						displayName: f.displayName,
+						provideDocumentRangeFormattingEdits: (model, range, options, _token) =>
+							this._provideRangeFormatting(model, range, options),
+					} as any)
+				);
+			}
 		}
 
 		if (caps.signatureHelp) {
@@ -2066,7 +2091,6 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 	}
 
 	private _syncActiveEditor(): void {
-		this._sendActiveEditor();
 		if (this._activeEditorSyncInitialized) {
 			return;
 		}
@@ -2285,19 +2309,33 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 				}
 			}
 
-			const activeChanged = activeId !== this._activeTrackedEditorId ? activeId : undefined;
-			if (activeChanged !== undefined) {this._activeTrackedEditorId = activeId;}
+			let activeChanged: string | null | undefined;
+			if (!this._initialEditorsDeltaSent) {
+				activeChanged = activeId;
+				this._activeTrackedEditorId = activeId;
+				this._initialEditorsDeltaSent = true;
+			} else {
+				activeChanged = activeId !== this._activeTrackedEditorId ? activeId : undefined;
+				if (activeChanged !== undefined) {this._activeTrackedEditorId = activeId;}
+			}
 
 			sendDelta(removed, added, activeChanged);
 		};
 
+		const handleAddedEditor = (editor: ICodeEditor) => {
+			const listeners: IDisposable[] = [];
+			listeners.push(editor.onDidChangeModel(() => updateState()));
+			listeners.push(editor.onDidFocusEditorText(() => updateState()));
+			updateState();
+			return listeners;
+		};
+
+		for (const existingEditor of this.codeEditorService.listCodeEditors()) {
+			handleAddedEditor(existingEditor);
+		}
+
 		this._register(this.codeEditorService.onCodeEditorAdd((editor) => {
-			if (shouldTrack(editor)) {
-				const listeners: IDisposable[] = [];
-				listeners.push(editor.onDidChangeModel(() => updateState()));
-				listeners.push(editor.onDidFocusEditorText(() => updateState()));
-				updateState();
-			}
+			handleAddedEditor(editor);
 		}));
 		this._register(this.codeEditorService.onCodeEditorRemove(() => updateState()));
 		this._register(this.editorService.onDidActiveEditorChange(() => updateState()));
@@ -2540,6 +2578,8 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 		const accessor = this._statusBarItems.get(msg.id);
 		if (accessor) {
 			accessor.update(this._makeStatusbarEntry(msg));
+		} else {
+			this._onStatusBarItemShow(msg);
 		}
 	}
 

@@ -418,6 +418,19 @@ class ExtensionHost extends EventEmitter {
   _handleActivateExtension(id, params) {
     try {
       const { extensionId } = params;
+      const ext = this._extensions.get(extensionId);
+      if (ext && !ext.activated) {
+        const events = ext.manifest?.activationEvents || [];
+        const hasStar = events.includes('*') || events.length === 0;
+        const hasStartupFinished = events.includes('onStartupFinished');
+        if (!hasStar && hasStartupFinished && !this._initialEditorsReceived) {
+          if (!this._deferredStartupActivations) {
+            this._deferredStartupActivations = new Set();
+          }
+          this._deferredStartupActivations.add(extensionId);
+          return { id, result: { activated: false, deferred: true } };
+        }
+      }
       this._activateExtension(extensionId).catch((e) => {
         log(`activation error (${extensionId}): ${e.message}`);
       });
@@ -540,6 +553,12 @@ class ExtensionHost extends EventEmitter {
 
   _handleEditorsDelta(id, params) {
     const { removedEditors, addedEditors, newActiveEditor } = params || {};
+    const wasInitialized = this._initialEditorsReceived;
+    this._initialEditorsReceived = true;
+    if (this._pendingStartupFinished) {
+      this._pendingStartupFinished = false;
+      queueMicrotask(() => this._checkActivationEvents('onStartupFinished'));
+    }
 
     if (removedEditors && Array.isArray(removedEditors)) {
       for (const edId of removedEditors) {
@@ -576,6 +595,16 @@ class ExtensionHost extends EventEmitter {
       this._activeEditorId = newActiveEditor;
       if (oldActiveId !== newActiveEditor) {
         this._onActiveEditorChangeEvent?.fire(newActiveEditor ? this._editorValues.get(newActiveEditor) : undefined);
+      }
+    }
+
+    if (!wasInitialized && this._deferredStartupActivations && this._deferredStartupActivations.size) {
+      const pending = [...this._deferredStartupActivations];
+      this._deferredStartupActivations.clear();
+      for (const extId of pending) {
+        this._activateExtension(extId).catch((e) =>
+          log(`deferred activation error (${extId}): ${e.message}`)
+        );
       }
     }
 
@@ -956,7 +985,11 @@ class ExtensionHost extends EventEmitter {
     const capabilities = {};
     for (const [kind, providers] of Object.entries(this._providers)) {
       if (providers.length > 0) {
-        capabilities[kind] = providers.map((p) => p.selector);
+        capabilities[kind] = providers.map((p) => ({
+          selector: p.selector,
+          extensionId: p.extensionId,
+          displayName: p.displayName,
+        }));
       }
     }
     return { id, result: capabilities };
@@ -1511,8 +1544,13 @@ class ExtensionHost extends EventEmitter {
         ext.module = mod;
         ext.context = context;
         if (typeof mod.activate === 'function') {
-          const result = await Promise.resolve(mod.activate(context));
-          ext.exports = result || mod;
+          this._currentActivatingExtension = { id: extensionId, displayName: ext.manifest?.displayName || ext.manifest?.name || extensionId };
+          try {
+            const result = await Promise.resolve(mod.activate(context));
+            ext.exports = result || mod;
+          } finally {
+            this._currentActivatingExtension = null;
+          }
         } else {
           ext.exports = mod;
         }
@@ -2471,7 +2509,13 @@ function createVscodeShim() {
   }
 
   function registerProvider(kind, selector, provider) {
-    const entry = { selector, provider };
+    const activating = host._currentActivatingExtension;
+    const entry = {
+      selector,
+      provider,
+      extensionId: activating?.id,
+      displayName: activating?.displayName || activating?.id,
+    };
     host._providers[kind].push(entry);
     return {
       dispose() {
@@ -5069,6 +5113,16 @@ if (process.env.SIDEX_EXTENSION_HOST === 'true' && process.send) {
   }
 
   setTimeout(() => {
+    if (!host._initialEditorsReceived) {
+      host._pendingStartupFinished = true;
+      setTimeout(() => {
+        if (host._pendingStartupFinished) {
+          host._pendingStartupFinished = false;
+          host._checkActivationEvents('onStartupFinished');
+        }
+      }, 2000);
+      return;
+    }
     host._checkActivationEvents('onStartupFinished');
     for (const [extId, ext] of host._extensions) {
       if (ext.activated) continue;
