@@ -728,6 +728,7 @@ impl SyntaxHighlighter {
                         #[allow(clippy::cast_possible_truncation)]
                         let mut col = start_pos.column as u32;
 
+                        #[allow(clippy::explicit_counter_loop)]
                         for segment in text.split('\n') {
                             if !segment.is_empty() {
                                 #[allow(clippy::cast_possible_truncation)]
