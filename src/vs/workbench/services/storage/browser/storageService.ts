@@ -138,10 +138,7 @@ export class BrowserStorageService extends AbstractStorageService {
 				this.profileStorage.onDidChangeStorage(e => this.emitDidChangeValue(StorageScope.PROFILE, e))
 			);
 		} else {
-			const profileStorageIndexedDB = await this.createStorageDatabase(
-				`global-${this.profileStorageProfile.id}`,
-				true
-			);
+			const profileStorageIndexedDB = await this.createStorageDatabase(`global-${this.profileStorageProfile.id}`, true);
 
 			this.profileStorageDatabase = this.profileStorageDisposables.add(profileStorageIndexedDB);
 			this.profileStorage = this.profileStorageDisposables.add(new Storage(this.profileStorageDatabase));

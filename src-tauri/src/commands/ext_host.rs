@@ -214,6 +214,7 @@ struct StartedSession {
     child: Child,
 }
 
+#[allow(clippy::too_many_lines)]
 fn spawn_host_process(
     app: &AppHandle,
     workspace_folders: &[String],
@@ -321,9 +322,9 @@ fn spawn_host_process(
     let port = {
         let mut reader = BufReader::new(stdout);
         let mut line = String::new();
-        let bytes_read = reader.read_line(&mut line).map_err(|e| {
-            format!("failed to read extension host port: {e}{}", recent_stderr())
-        })?;
+        let bytes_read = reader
+            .read_line(&mut line)
+            .map_err(|e| format!("failed to read extension host port: {e}{}", recent_stderr()))?;
         if bytes_read == 0 {
             let _ = child.kill();
             return Err(format!(

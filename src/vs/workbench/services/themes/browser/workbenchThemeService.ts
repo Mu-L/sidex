@@ -184,7 +184,13 @@ export class WorkbenchThemeService extends Disposable implements IWorkbenchTheme
 		this.settings = new ThemeConfiguration(configurationService, hostColorService);
 
 		this.colorThemeRegistry = this._register(
-			new ThemeRegistry(colorThemesExtPoint, ColorThemeData.fromExtensionTheme, false, undefined, createBuiltInColorThemes())
+			new ThemeRegistry(
+				colorThemesExtPoint,
+				ColorThemeData.fromExtensionTheme,
+				false,
+				undefined,
+				createBuiltInColorThemes()
+			)
 		);
 		this.colorThemeWatcher = this._register(
 			new ThemeFileWatcher(fileService, environmentService, this.reloadCurrentColorTheme.bind(this))
